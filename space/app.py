@@ -32,7 +32,7 @@ from pathlib import Path
 import gradio as gr
 import spaces
 
-MODEL_FILENAME = os.environ.get("MODEL_FILENAME", "model_bs_roformer_ep_317_sdr_12.9755.ckpt")
+MODEL_FILENAME = os.environ.get("MODEL_FILENAME", "mel_band_roformer_instrumental_instv8n_gabox.ckpt")
 MODEL_DIR = os.environ.get("MODEL_DIR", "/tmp/audio-separator-models")
 OPUS_BITRATE = os.environ.get("OPUS_BITRATE", "96k")  # Tacet stores stems at 96k anyway
 HF_TOKEN = os.environ.get("HF_TOKEN", "")

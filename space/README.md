@@ -29,7 +29,7 @@ and returns vocals and instrumental as Opus.
 
 | Variable | Default | What it does |
 |---|---|---|
-| `MODEL_FILENAME` | `model_bs_roformer_ep_317_sdr_12.9755.ckpt` | Any 2-stem vocals model audio-separator knows |
+| `MODEL_FILENAME` | `mel_band_roformer_instrumental_instv8n_gabox.ckpt` | Any 2-stem vocals model audio-separator knows |
 | `OPUS_BITRATE` | `96k` | Bitrate of the returned stems (Tacet stores 96k) |
 | `HF_TOKEN` (secret) | none | Write token for `STEMS_REPO`. With it, stems go back over the Hub CDN instead of the slow `*.hf.space` proxy |
 | `STEMS_REPO` | `<you>/tacet-stems` | Private dataset the stems are committed to; folders older than `STEMS_TTL_HOURS` (24) are deleted |

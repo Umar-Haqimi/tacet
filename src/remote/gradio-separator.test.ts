@@ -130,3 +130,40 @@ describe("separateRemotely", () => {
     ).rejects.toMatchObject({ name: "AbortError" });
   });
 });
+
+describe("separateRemotely with Hub links", () => {
+  const HUB = "https://huggingface.co/datasets/a/tacet-stems/resolve/abc123/stems/1-x";
+  const WITH_LINKS = `event: complete\ndata: [{"path": "/tmp/vocals.ogg"}, {"path": "/tmp/instrumental.ogg"}, {"vocals": "${HUB}/vocals.ogg", "instrumental": "${HUB}/instrumental.ogg"}]\n\n`;
+
+  it("downloads from the Hub instead of the Space", async () => {
+    const { fetchImpl, seen } = fakeFetch(WITH_LINKS, {
+      [`${HUB}/vocals.ogg`]: new Response("HV"),
+      [`${HUB}/instrumental.ogg`]: new Response("HI"),
+    });
+    const stems = await run(fetchImpl);
+
+    expect(await stems.vocals.text()).toBe("HV");
+    expect(await stems.instrumental.text()).toBe("HI");
+    expect(seen.some(s => s.url.includes("/gradio_api/file="))).toBe(false);
+    const hubCall = seen.find(s => s.url.startsWith(HUB));
+    expect((hubCall?.init?.headers as Record<string, string>).Authorization).toBe("Bearer hf_secret");
+  });
+
+  it("falls back to the Space when the Hub download fails", async () => {
+    const { fetchImpl, seen } = fakeFetch(WITH_LINKS, {
+      [`${HUB}/vocals.ogg`]: new Response("gone", { status: 404 }),
+      [`${HUB}/instrumental.ogg`]: new Response("HI"),
+    });
+    const stems = await run(fetchImpl);
+
+    expect(await stems.vocals.text()).toBe("V");
+    expect(seen.filter(s => s.url.includes("/gradio_api/file="))).toHaveLength(2);
+  });
+
+  it("ignores links that do not point at huggingface.co", async () => {
+    const evil = `event: complete\ndata: [{"path": "/tmp/v.ogg"}, {"path": "/tmp/i.ogg"}, {"vocals": "https://evil.example/v", "instrumental": "https://evil.example/i"}]\n\n`;
+    const { fetchImpl, seen } = fakeFetch(evil);
+    await run(fetchImpl);
+    expect(seen.some(s => s.url.startsWith("https://evil.example"))).toBe(false);
+  });
+});

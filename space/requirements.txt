@@ -2,3 +2,4 @@ audio-separator[cpu]==0.48.0
 audioread
 torch>=2.8
 spaces
+huggingface_hub

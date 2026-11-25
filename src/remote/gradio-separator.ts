@@ -5,7 +5,9 @@
 //   1. POST {origin}/gradio_api/upload              multipart "files"  -> ["<server path>"]
 //   2. POST {origin}/gradio_api/call/separate       {data:[FileData]}  -> {event_id}
 //   3. GET  {origin}/gradio_api/call/separate/{id}  server-sent events -> complete | error
-//   4. GET  {origin}/gradio_api/file=<path>         each returned stem
+//   4. GET  each returned stem: from the Hub CDN when the Space published them there
+//      (result[2] = {vocals, instrumental} links), else {origin}/gradio_api/file=<path>.
+//      The *.hf.space proxy can crawl at tens of KB/s; huggingface.co does not.
 // Every request carries the Hugging Face token, which is what lets a private Space
 // answer and what bills ZeroGPU time to the account's own quota.
 
@@ -71,7 +73,28 @@ function isFileRef(value: unknown): value is FileRef {
   return typeof value === "object" && value !== null && typeof (value as { path?: unknown }).path === "string";
 }
 
-function readStemRefs(events: SseEvent[]): { vocals: FileRef; instrumental: FileRef } {
+interface HubLinks {
+  vocals: string;
+  instrumental: string;
+}
+
+const HUB_LINK_PREFIX = "https://huggingface.co/";
+
+function readHubLinks(value: unknown): HubLinks | null {
+  if (typeof value !== "object" || value === null) return null;
+  const { vocals, instrumental } = value as { vocals?: unknown; instrumental?: unknown };
+  if (typeof vocals !== "string" || typeof instrumental !== "string") return null;
+  if (!vocals.startsWith(HUB_LINK_PREFIX) || !instrumental.startsWith(HUB_LINK_PREFIX)) return null;
+  return { vocals, instrumental };
+}
+
+interface StemRefs {
+  vocals: FileRef;
+  instrumental: FileRef;
+  hub: HubLinks | null;
+}
+
+function readStemRefs(events: SseEvent[]): StemRefs {
   for (const { event, data } of events) {
     if (event === "error") throw errorFromEventData(data);
     if (event !== "complete") continue;
@@ -85,7 +108,7 @@ function readStemRefs(events: SseEvent[]): { vocals: FileRef; instrumental: File
     if (!Array.isArray(parsed) || parsed.length < 2 || !isFileRef(parsed[0]) || !isFileRef(parsed[1])) {
       throw new RemoteSeparationError("bad-response", `expected two files, got ${data.slice(0, 200)}`);
     }
-    return { vocals: parsed[0], instrumental: parsed[1] };
+    return { vocals: parsed[0], instrumental: parsed[1], hub: readHubLinks(parsed[2]) };
   }
   throw new RemoteSeparationError("bad-response", "the event stream ended without a result");
 }
@@ -173,14 +196,23 @@ async function separateRemotely(opts: RemoteSeparateOptions): Promise<RemoteStem
   const refs = readStemRefs(parseSseEvents(await streamResponse.text()));
 
   opts.onPhase?.("downloading");
-  const [vocals, instrumental] = await Promise.all(
-    [refs.vocals, refs.instrumental].map(async ref => {
-      const response = await checkedFetch(fetchImpl, fileUrl(opts.origin, ref), { ...base, headers: auth }, "download");
-      return response.blob();
-    })
-  );
-  return { vocals, instrumental };
+  const download = async (urls: [string, string]): Promise<RemoteStems> => {
+    const [vocals, instrumental] = await Promise.all(
+      urls.map(async url => (await checkedFetch(fetchImpl, url, { ...base, headers: auth }, "download")).blob())
+    );
+    return { vocals, instrumental };
+  };
+
+  if (refs.hub) {
+    try {
+      return await download([refs.hub.vocals, refs.hub.instrumental]);
+    } catch (error) {
+      if (opts.signal?.aborted) throw error;
+      // The Space still serves the same files, just slowly.
+    }
+  }
+  return download([fileUrl(opts.origin, refs.vocals), fileUrl(opts.origin, refs.instrumental)]);
 }
 
 export { RemoteSeparationError, parseSseEvents, readStemRefs, separateRemotely };
-export type { RemoteErrorCode, RemoteSeparateOptions, RemoteStems, SseEvent, FetchLike };
+export type { RemoteErrorCode, RemoteSeparateOptions, RemoteStems, SseEvent, FetchLike, HubLinks };

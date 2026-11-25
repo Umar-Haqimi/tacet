@@ -6,8 +6,12 @@ mp4/aac, anything ffmpeg reads) and returns two Opus files: vocals and instrumen
 Pipeline:
   1. CPU: ffmpeg decodes the upload to 44.1 kHz stereo float32 WAV.
   2. GPU: audio-separator runs a BS/Mel-Band RoFormer model on it. Float input keeps
-     float output, and normalization is disabled, so stems keep the mix's levels.
+     float output.
   3. CPU: ffmpeg encodes both stems to Opus for a small download.
+
+audio-separator rescales any stem whose peak passes 1.0, independently per stem, which
+would shift the stems' levels against each other and against the original. So the mix
+goes in 6 dB down (no stem gets near 1.0) and the stems come back up 6 dB on encode.
 """
 
 from __future__ import annotations
@@ -35,7 +39,7 @@ GPU_MAX_SECONDS = float(os.environ.get("GPU_MAX_SECONDS", "180"))
 MOCK = os.environ.get("TACET_MOCK") == "1"  # local testing without a model or GPU
 
 SAMPLE_RATE = 44_100
-NO_NORMALIZATION = 1e9
+HEADROOM = 0.5  # -6 dB going in, undone on the way out
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("tacet-space")
@@ -61,11 +65,11 @@ def probe_seconds(path: str) -> float:
 
 def decode_to_float_wav(src: str, dst: str) -> None:
     run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", src, "-vn",
-         "-ac", "2", "-ar", str(SAMPLE_RATE), "-c:a", "pcm_f32le", dst])
+         "-ac", "2", "-ar", str(SAMPLE_RATE), "-af", f"volume={HEADROOM}", "-c:a", "pcm_f32le", dst])
 
 
 def encode_opus(src: str, dst: str) -> None:
-    run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", src,
+    run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", src, "-af", f"volume={1 / HEADROOM}",
          "-c:a", "libopus", "-b:a", OPUS_BITRATE, "-vbr", "on", "-application", "audio", dst])
 
 
@@ -99,7 +103,7 @@ def separate_on_gpu(wav_path: str, seconds: float, workdir: str) -> tuple[str, s
         output_dir=workdir,
         output_format="WAV",
         use_soundfile=True,  # keeps the float32 subtype of the input
-        normalization_threshold=NO_NORMALIZATION,
+        normalization_threshold=1.0,  # only touches peaks above 1.0, which the headroom avoids
         amplification_threshold=0.0,
         use_autocast=True,
         log_level=logging.WARNING,

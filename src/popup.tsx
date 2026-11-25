@@ -20,6 +20,13 @@ import {
   selectTab,
   toggleAbout,
 } from "@/settings/popup-tabs";
+import {
+  DEFAULT_REMOTE_SETTINGS,
+  REMOTE_STORAGE_KEY,
+  type RemoteSettings,
+  resolveSpaceOrigin,
+  sanitizeRemoteSettings,
+} from "@/remote/remote-settings";
 import { createSelect } from "@/settings/select";
 import { SEPARATION_MODE_OPTIONS, type SeparationMode, separationModeNote } from "@/settings/separation-mode";
 import {
@@ -319,6 +326,109 @@ function createModelVariantRow(
 
   row.append(text, select.element);
   return { row, setValue: select.setValue };
+}
+
+// -- Remote separation (Hugging Face Space) -----------------------------------
+
+function createTextInputRow(
+  labelText: string,
+  hintText: string,
+  opts: { value: string; placeholder: string; secret?: boolean; onCommit: (value: string) => void }
+): { row: HTMLElement; input: HTMLInputElement; setHint(text: string): void } {
+  const row = createElement("div", "blk-row blk-row--stack");
+  const { text, hint, labelId } = createTextRow(labelText, hintText);
+  const input = createElement("input", "blk-input");
+  input.type = opts.secret ? "password" : "text";
+  input.value = opts.value;
+  input.placeholder = opts.placeholder;
+  input.spellcheck = false;
+  input.autocomplete = "off";
+  input.setAttribute("aria-labelledby", labelId);
+  input.addEventListener("change", () => opts.onCommit(input.value.trim()));
+  row.append(text, input);
+  return {
+    row,
+    input,
+    setHint(next) {
+      hint.textContent = next;
+    },
+  };
+}
+
+const SPACE_HINT = "Your ZeroGPU Space: owner/name, its page, or its hf.space address.";
+
+function describeSpace(value: string): string {
+  if (value.trim() === "") return SPACE_HINT;
+  const origin = resolveSpaceOrigin(value);
+  return origin ? `Calls ${origin}` : "That does not look like a Space address.";
+}
+
+async function loadRemoteSettings(): Promise<RemoteSettings> {
+  const result = await chrome.storage.local.get(REMOTE_STORAGE_KEY);
+  return sanitizeRemoteSettings(result[REMOTE_STORAGE_KEY]);
+}
+
+async function createRemoteRows(onError: (message: string) => void): Promise<HTMLElement[]> {
+  let remote = await loadRemoteSettings().catch(error => {
+    console.error(`${LOG_PREFIX} failed to load the remote settings`, error);
+    return DEFAULT_REMOTE_SETTINGS;
+  });
+
+  function save(partial: Partial<RemoteSettings>): void {
+    const next = sanitizeRemoteSettings({ ...remote, ...partial });
+    chrome.storage.local
+      .set({ [REMOTE_STORAGE_KEY]: next })
+      .then(() => {
+        remote = next;
+      })
+      .catch(error => {
+        console.error(`${LOG_PREFIX} failed to save the remote settings`, error);
+        onError("Could not save that.");
+      });
+  }
+
+  const detailRows: HTMLElement[] = [];
+  function paintDetails(enabled: boolean): void {
+    for (const row of detailRows) row.hidden = !enabled;
+  }
+
+  const enabledToggle = createToggle(
+    "Separate on Hugging Face",
+    "Sends the track to your own ZeroGPU Space and uses its RoFormer stems instead of running Demucs here. Applies from the next track.",
+    remote.enabled,
+    next => {
+      save({ enabled: next });
+      paintDetails(next);
+    }
+  );
+
+  const spaceRow = createTextInputRow("Space", describeSpace(remote.spaceUrl), {
+    value: remote.spaceUrl,
+    placeholder: "owner/tacet-separator",
+    onCommit: value => {
+      spaceRow.setHint(describeSpace(value));
+      save({ spaceUrl: value });
+    },
+  });
+  spaceRow.input.addEventListener("input", () => spaceRow.setHint(describeSpace(spaceRow.input.value)));
+
+  const tokenRow = createTextInputRow("Access token", "A read token. Kept on this device, never synced.", {
+    value: remote.token,
+    placeholder: "hf_...",
+    secret: true,
+    onCommit: value => save({ token: value }),
+  });
+
+  const fallbackToggle = createToggle(
+    "Fall back to this device",
+    "When the Space fails or the GPU quota runs out, separate here instead of giving up.",
+    remote.fallbackToLocal,
+    next => save({ fallbackToLocal: next })
+  );
+
+  detailRows.push(spaceRow.row, tokenRow.row, fallbackToggle.row);
+  paintDetails(remote.enabled);
+  return [enabledToggle.row, ...detailRows];
 }
 
 // -- Separation mode row -------------------------------------------------------
@@ -1071,7 +1181,8 @@ async function main(): Promise<void> {
     debugLoggingToggle.row
   );
 
-  const separationPanel = createPanel(modelVariantRow.row);
+  const remoteRows = await createRemoteRows(showStatus);
+  const separationPanel = createPanel(modelVariantRow.row, ...remoteRows);
 
   const sourcesPanel = createSourcesPanel(settings.sources, next => {
     saveSettingsFrom(chrome.storage.sync, { sources: next }).catch(error => {

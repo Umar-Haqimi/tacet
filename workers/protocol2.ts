@@ -1,3 +1,4 @@
+import type { RemoteSettings } from "../src/remote/remote-settings.js";
 import type { Settings } from "../src/settings/settings.js";
 
 // -- Separation control messages ------------------------------------------------------
@@ -325,12 +326,14 @@ export interface SettingsMessage {
   type: "blk-settings";
   settings: Settings;
   model: ModelChoice;
+  remote?: RemoteSettings;
 }
 
 export interface SettingsChangedMessage {
   type: "blk-settings-changed";
   settings: Settings;
   model: ModelChoice;
+  remote?: RemoteSettings;
 }
 
 export function isGetSettingsCommand(data: unknown): data is GetSettingsCommand {

@@ -42,7 +42,10 @@
     "../src/relay/base64.ts",
     "../src/relay/chunk-transfer.ts",
     "../src/settings/separation-mode.ts",
-    "../src/settings/settings.ts"
+    "../src/settings/settings.ts",
+    "../src/remote/remote-settings.ts",
+    "../src/remote/gradio-separator.ts",
+    "../src/remote/fit-frames.ts"
   ],
   "exclude": ["./*.test.ts"]
 }

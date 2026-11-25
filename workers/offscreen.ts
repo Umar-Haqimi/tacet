@@ -3,6 +3,7 @@ import { SEPARATION_VERSION, clearAllAliases } from "../src/cache/keys.js";
 import { clearCachedModel, getCachedModelSize } from "../src/cache/model-cache.js";
 import { getModelSha256, getModelUrl } from "../src/cache/model-url.js";
 import { clearAllStemRecords, evictUntilWithinBudget, getTotalStemBytes } from "../src/cache/stem-store.js";
+import { type RemoteBackend, type RemoteSettings, remoteBackendFrom } from "../src/remote/remote-settings.js";
 import { DEFAULT_SETTINGS, shouldEvictForNewBudget } from "../src/settings/settings.js";
 import type { Settings } from "../src/settings/settings.js";
 import {
@@ -62,12 +63,14 @@ let currentModelChoice: ModelChoice = {
   modelSha256: getModelSha256(DEFAULT_SETTINGS.modelVariant),
 };
 let modelChoiceReceived = false;
+let currentRemoteBackend: RemoteBackend | null = null;
 
-function applySettings(settings: Settings, model: ModelChoice): void {
+function applySettings(settings: Settings, model: ModelChoice, remote?: RemoteSettings): void {
   setLoggingEnabled(settings.debugLoggingEnabled);
   currentCacheBudgetBytes = settings.cacheBudgetBytes;
   currentModelChoice = model;
   modelChoiceReceived = true;
+  currentRemoteBackend = remoteBackendFrom(remote);
 }
 
 async function reactToBudgetChange(newBudgetBytes: number): Promise<void> {
@@ -87,7 +90,7 @@ async function loadSettingsOverRelay(): Promise<void> {
     try {
       const response: unknown = await chrome.runtime.sendMessage(getSettingsCommand);
       if (isSettingsMessage(response)) {
-        applySettings(response.settings, response.model);
+        applySettings(response.settings, response.model, response.remote);
         return;
       }
       logger.warn(`settings request ${attempt + 1} came back as ${JSON.stringify(response)}`);
@@ -120,7 +123,12 @@ function getModelChoice(): ModelChoice {
 // -- Real separation host -----------------------------------------------
 
 const separationHost = new SeparationHost();
-const trackPipeline = new TrackPipeline(separationHost, getCacheBudgetBytes, getModelChoice);
+const trackPipeline = new TrackPipeline(
+  separationHost,
+  getCacheBudgetBytes,
+  getModelChoice,
+  () => currentRemoteBackend
+);
 
 chrome.runtime.onMessage.addListener((message, sender) => {
   if (sender.tab !== undefined && isRelayedThroughBackground(message)) return undefined;
@@ -143,7 +151,7 @@ chrome.runtime.onMessage.addListener((message, sender) => {
   }
 
   if (isSettingsChangedMessage(message)) {
-    applySettings(message.settings, message.model);
+    applySettings(message.settings, message.model, message.remote);
     reactToBudgetChange(message.settings.cacheBudgetBytes).catch(error => {
       logger.error("failed to react to a settings change", error);
     });

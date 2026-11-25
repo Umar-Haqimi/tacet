@@ -38,7 +38,8 @@
       "https://music.youtube.com/*",
       "https://www.youtube.com/*",
       "https://*.googlevideo.com/*",
-      "https://models.betterlyrics.org/*"
+      "https://models.betterlyrics.org/*",
+      "https://*.hf.space/*"
     ],
     "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArXxvekuv4grdgbAaCvcFhRUZElp2sLdzc4c+qKQ8JSk6miRUrME+gx1pPHUxPjtC3zBUftn/CJXoU6LG3cE+R3VvfbhNTurSEq09NaPzFPqne3UBhOd2nDlOUf2WIIuTN1rt21W6FMwoJEwetJvP3RkfEQAicmaSZlW9VzGD071Nl2OpGktArtedOQKSx5F/S7+hRpBlR7fTErWHjcBVvUtUYGF/1qFgbTbAppuzq2+Kg0W39Sf291zB4GPnFTi6zhvJ1JQayNthurKmP4qr3GXA/Hcc8UMcOckbhwGcxGDj+HNUhahsWNcM+7liSTvba8YIVzrBa77n0iyd9BEDdwIDAQAB",
     "permissions": ["storage", "offscreen", "declarativeNetRequestWithHostAccess"],
@@ -55,6 +56,7 @@
           "assets/src/cache/*",
           "assets/src/orchestrator/*",
           "assets/src/relay/*",
+          "assets/src/remote/*",
           "assets/src/settings/*",
           "assets/src/shared/*",
           "assets/offscreen.html"

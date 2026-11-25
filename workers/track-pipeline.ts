@@ -12,6 +12,9 @@ import { encodePcmToOpus } from "../src/cache/opus-codec.js";
 import { deleteEntries, getStemRecord, putStemRecord } from "../src/cache/stem-store.js";
 import type { StemRecord } from "../src/cache/stem-store.js";
 import { decodeFileToFloat32 } from "../src/separation/audio-codec.js";
+import { fitToFrames } from "../src/remote/fit-frames.js";
+import { separateRemotely } from "../src/remote/gradio-separator.js";
+import type { RemoteBackend } from "../src/remote/remote-settings.js";
 
 // -- Signal tracing -------------------------------------------------------
 function stageRms(channel: Float32Array | undefined): string {
@@ -78,6 +81,27 @@ interface DecodedTrack {
   numFrames: number;
 }
 
+interface SourceAudio {
+  bytes: Uint8Array<ArrayBuffer>;
+  mimeType: string;
+}
+
+interface SeparatedStems {
+  vocals: Float32Array[];
+  instrumental: Float32Array[];
+}
+
+// -- Remote separation (Hugging Face Space) -----------------------------------------
+
+const REMOTE_PHASES = ["uploading", "queued", "downloading"] as const;
+
+function fileNameFor(videoId: string, mimeType: string): string {
+  const subtype = mimeType.split(";")[0]?.split("/")[1]?.trim() ?? "";
+  const extension =
+    subtype === "mp4" ? "m4a" : subtype === "mpeg" ? "mp3" : /^[a-z0-9]+$/.test(subtype) ? subtype : "bin";
+  return `${videoId}.${extension}`;
+}
+
 class TrackPipeline {
   private activeVideoId: string | null = null;
   private runningVideoId: string | null = null;
@@ -85,6 +109,7 @@ class TrackPipeline {
   private lastProgress: { processed: number; total: number } | null = null;
   private captureAssembler: ChunkAssembler | null = null;
   private captureMimeType = "";
+  private remoteAbort: AbortController | null = null;
 
   private republishProgress(videoId: string): void {
     if (shouldRepublishStage(this.currentStage)) {
@@ -98,8 +123,15 @@ class TrackPipeline {
   constructor(
     private separationHost: SeparationHost,
     private getCacheBudgetBytes: () => number,
-    private getModelChoice: () => ModelChoice
+    private getModelChoice: () => ModelChoice,
+    private getRemoteBackend: () => RemoteBackend | null = () => null
   ) {}
+
+  private cancelSeparation(): void {
+    this.separationHost.cancel();
+    this.remoteAbort?.abort();
+    this.remoteAbort = null;
+  }
 
   private isStale(videoId: string): boolean {
     return videoId !== this.activeVideoId;
@@ -117,7 +149,7 @@ class TrackPipeline {
 
   private claimTrack(videoId: string): void {
     if (videoId === this.activeVideoId) return;
-    this.separationHost.cancel();
+    this.cancelSeparation();
     this.activeVideoId = videoId;
     this.captureAssembler = null;
     this.captureMimeType = "";
@@ -130,7 +162,7 @@ class TrackPipeline {
       this.republishProgress(videoId);
       return;
     }
-    if (decision === "supersede") this.separationHost.cancel();
+    if (decision === "supersede") this.cancelSeparation();
 
     this.currentStage = null;
     this.lastProgress = null;
@@ -228,7 +260,7 @@ class TrackPipeline {
   }
 
   cancelActive(): void {
-    this.separationHost.cancel();
+    this.cancelSeparation();
     this.activeVideoId = null;
     this.runningVideoId = null;
     this.captureAssembler = null;
@@ -277,42 +309,17 @@ class TrackPipeline {
       return;
     }
 
-    await this.separate(videoId, contentKey, decoded);
+    await this.separate(videoId, contentKey, decoded, { bytes, mimeType });
   }
 
-  private async separate(videoId: string, contentKey: string, decoded: DecodedTrack): Promise<void> {
-    const model = this.getModelChoice();
-    this.sendStage(videoId, (await hasCachedModel(model.modelUrl)) ? "loading-model" : "downloading-model");
-    if (this.isStale(videoId)) return;
-
-    await this.separationHost.init(model);
-    if (this.isStale(videoId)) return;
-
-    this.sendStage(videoId, "separating");
-    const accumulator = createRegionAccumulator(decoded.numFrames, decoded.channels.length);
-    let loggedRegions = 0;
-
-    await this.separationHost.process({
-      channels: decoded.channels,
-      totalFrames: decoded.numFrames,
-      onProgress: (processed, total) => {
-        if (this.isStale(videoId)) return;
-        this.lastProgress = { processed, total };
-        post({ type: "blk-track-progress", videoId, processed, total });
-      },
-      onRegion: region => {
-        if (loggedRegions < 3) {
-          loggedRegions++;
-          logger.log(
-            `region @${region.regionStart}: vocals=${stageRms(region.vocals[0])}, instrumental=${stageRms(
-              region.instrumental[0]
-            )}, frames=${region.vocals[0]?.length ?? 0}`
-          );
-        }
-        accumulator.addRegion(region.regionStart, region.vocals, region.instrumental);
-      },
-    });
-    if (this.isStale(videoId)) return;
+  private async separate(
+    videoId: string,
+    contentKey: string,
+    decoded: DecodedTrack,
+    source: SourceAudio
+  ): Promise<void> {
+    const accumulator = await this.separateStems(videoId, decoded, source);
+    if (!accumulator || this.isStale(videoId)) return;
 
     this.sendStage(videoId, "encoding");
     logger.log(
@@ -338,6 +345,114 @@ class TrackPipeline {
     if (this.isStale(videoId)) return;
 
     await this.deliverBlobs(videoId, vocalsBlob, instrumentalBlob);
+  }
+
+  private async separateStems(
+    videoId: string,
+    decoded: DecodedTrack,
+    source: SourceAudio
+  ): Promise<SeparatedStems | null> {
+    const remote = this.getRemoteBackend();
+    if (remote) {
+      try {
+        return await this.separateRemote(videoId, decoded, source, remote);
+      } catch (error) {
+        if (isAbortError(error)) throw error;
+        if (!remote.fallbackToLocal) {
+          this.sendError(videoId, "remote-failed", toErrorMessage(error));
+          return null;
+        }
+        logger.warn(`remote separation of ${videoId} failed, separating on this device: ${toErrorMessage(error)}`);
+        if (this.isStale(videoId)) return null;
+      }
+    }
+    return this.separateLocal(videoId, decoded);
+  }
+
+  private async separateRemote(
+    videoId: string,
+    decoded: DecodedTrack,
+    source: SourceAudio,
+    remote: RemoteBackend
+  ): Promise<SeparatedStems | null> {
+    this.sendStage(videoId, "separating");
+    const controller = new AbortController();
+    this.remoteAbort = controller;
+    const started = performance.now();
+    const totalSteps = REMOTE_PHASES.length + 1;
+    const reportStep = (done: number): void => {
+      if (this.isStale(videoId)) return;
+      this.lastProgress = { processed: done, total: totalSteps };
+      post({ type: "blk-track-progress", videoId, ...this.lastProgress });
+    };
+
+    try {
+      const remoteStems = await separateRemotely({
+        origin: remote.origin,
+        token: remote.token,
+        audio: new Blob([source.bytes], { type: source.mimeType }),
+        fileName: fileNameFor(videoId, source.mimeType),
+        signal: controller.signal,
+        onPhase: phase => {
+          logger.log(`remote ${phase}: ${videoId}`);
+          reportStep(REMOTE_PHASES.indexOf(phase));
+        },
+      });
+      if (this.isStale(videoId)) return null;
+
+      const [vocals, instrumental] = await Promise.all([
+        decodeFileToFloat32(remoteStems.vocals, { stripPriming: false }),
+        decodeFileToFloat32(remoteStems.instrumental, { stripPriming: false }),
+      ]);
+      reportStep(totalSteps);
+      logger.log(
+        `remote stems for ${videoId} in ${Math.round(performance.now() - started)} ms: frames=${vocals.numFrames}/${
+          decoded.numFrames
+        }, vocals=${stageRms(vocals.channels[0])}, instrumental=${stageRms(instrumental.channels[0])}`
+      );
+      const channelCount = decoded.channels.length;
+      return {
+        vocals: fitToFrames(vocals.channels, decoded.numFrames, channelCount),
+        instrumental: fitToFrames(instrumental.channels, decoded.numFrames, channelCount),
+      };
+    } finally {
+      if (this.remoteAbort === controller) this.remoteAbort = null;
+    }
+  }
+
+  private async separateLocal(videoId: string, decoded: DecodedTrack): Promise<SeparatedStems | null> {
+    const model = this.getModelChoice();
+    this.sendStage(videoId, (await hasCachedModel(model.modelUrl)) ? "loading-model" : "downloading-model");
+    if (this.isStale(videoId)) return null;
+
+    await this.separationHost.init(model);
+    if (this.isStale(videoId)) return null;
+
+    this.sendStage(videoId, "separating");
+    const accumulator = createRegionAccumulator(decoded.numFrames, decoded.channels.length);
+    let loggedRegions = 0;
+
+    await this.separationHost.process({
+      channels: decoded.channels,
+      totalFrames: decoded.numFrames,
+      onProgress: (processed, total) => {
+        if (this.isStale(videoId)) return;
+        this.lastProgress = { processed, total };
+        post({ type: "blk-track-progress", videoId, processed, total });
+      },
+      onRegion: region => {
+        if (loggedRegions < 3) {
+          loggedRegions++;
+          logger.log(
+            `region @${region.regionStart}: vocals=${stageRms(region.vocals[0])}, instrumental=${stageRms(
+              region.instrumental[0]
+            )}, frames=${region.vocals[0]?.length ?? 0}`
+          );
+        }
+        accumulator.addRegion(region.regionStart, region.vocals, region.instrumental);
+      },
+    });
+    return { vocals: accumulator.vocals, instrumental: accumulator.instrumental };
   }
 
   private async deliver(videoId: string, record: Pick<StemRecord, "vocals" | "instrumental">): Promise<void> {

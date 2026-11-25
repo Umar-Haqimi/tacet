@@ -3,6 +3,7 @@ import { createTabRegistry } from "@/orchestrator/tab-registry";
 import { SETTINGS_STORAGE_KEY, sanitizeSettings } from "@/settings/settings";
 import type { Settings } from "@/settings/settings";
 import { loadSettingsFrom } from "@/settings/storage";
+import { REMOTE_STORAGE_KEY, type RemoteSettings, sanitizeRemoteSettings } from "@/remote/remote-settings";
 import {
   type ModelChoice,
   type SettingsChangedMessage,
@@ -150,9 +151,9 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
 chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
   if (!isGetSettingsCommand(message)) return undefined;
 
-  loadSettingsFrom(chrome.storage.sync)
-    .then(settings => {
-      const response: SettingsMessage = { type: "blk-settings", settings, model: modelChoiceFor(settings) };
+  Promise.all([loadSettingsFrom(chrome.storage.sync), loadRemoteSettings()])
+    .then(([settings, remote]) => {
+      const response: SettingsMessage = { type: "blk-settings", settings, model: modelChoiceFor(settings), remote };
       sendResponse(response);
     })
     .catch(error => {
@@ -165,19 +166,29 @@ loadSettingsFrom(chrome.storage.sync)
   .then(settings => setLoggingEnabled(settings.debugLoggingEnabled))
   .catch(error => logger.error("failed to read the logging setting", error));
 
+async function loadRemoteSettings(): Promise<RemoteSettings> {
+  const result = await chrome.storage.local.get(REMOTE_STORAGE_KEY);
+  return sanitizeRemoteSettings(result[REMOTE_STORAGE_KEY]);
+}
+
 chrome.storage.onChanged.addListener((changes, areaName) => {
-  if (areaName !== "sync" || !(SETTINGS_STORAGE_KEY in changes)) return;
-  setLoggingEnabled(sanitizeSettings(changes[SETTINGS_STORAGE_KEY].newValue).debugLoggingEnabled);
+  const syncedChanged = areaName === "sync" && SETTINGS_STORAGE_KEY in changes;
+  const remoteChanged = areaName === "local" && REMOTE_STORAGE_KEY in changes;
+  if (!syncedChanged && !remoteChanged) return;
+  if (syncedChanged) {
+    setLoggingEnabled(sanitizeSettings(changes[SETTINGS_STORAGE_KEY].newValue).debugLoggingEnabled);
+  }
 
   chrome.offscreen
     .hasDocument()
     .then(async hasDocument => {
       if (!hasDocument) return;
-      const settings = await loadSettingsFrom(chrome.storage.sync);
+      const [settings, remote] = await Promise.all([loadSettingsFrom(chrome.storage.sync), loadRemoteSettings()]);
       const message: SettingsChangedMessage = {
         type: "blk-settings-changed",
         settings,
         model: modelChoiceFor(settings),
+        remote,
       };
       await chrome.runtime.sendMessage(message);
     })

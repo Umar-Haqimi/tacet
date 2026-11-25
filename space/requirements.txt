@@ -1,0 +1,3 @@
+audio-separator==0.48.0
+torch>=2.8
+spaces

@@ -180,4 +180,5 @@ with gr.Blocks(title="Tacet remote separator") as demo:
 prefetch_model()
 
 if __name__ == "__main__":
-    demo.queue(default_concurrency_limit=2).launch()
+    # SSR (a Node proxy in front of Python) is no use to an API-only backend.
+    demo.queue(default_concurrency_limit=2).launch(ssr_mode=False)
